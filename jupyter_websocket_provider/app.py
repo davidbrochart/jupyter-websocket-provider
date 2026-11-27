@@ -1,7 +1,7 @@
 from pathlib import Path
 from uuid import uuid4
 
-from anyio import Event, create_task_group, sleep_forever
+from anyio import Event, create_task_group, current_time, sleep_forever, to_thread
 from jupyter_core.utils import ensure_async
 from jupyter_server.extension.application import ExtensionApp
 from jupyter_server.services.contents.filemanager import FileContentsManager
@@ -18,6 +18,8 @@ from .handlers import (
     rename_rooms,
     retire_changed_rooms,
 )
+
+MOVE_EVENT_GRACE = 1.0
 
 
 class WebSocketProviderExtension(ExtensionApp):
@@ -67,36 +69,43 @@ class WebSocketProviderExtension(ExtensionApp):
     async def _watch_local_changes(self, manager: FileContentsManager):
         try:
             root = Path(manager.root_dir).resolve()
+            recent_paths: dict[str, float] = {}
+            missing_paths: dict[str, float] = {}
             async for changes in awatch(
-                root, watch_filter=None, ignore_permission_denied=True, rust_timeout=1000
+                root, watch_filter=None, ignore_permission_denied=True,
+                rust_timeout=500, yield_on_timeout=True,
             ):
+                now = current_time()
                 changed = set()
                 added_or_removed = set()
-                added = set()
                 for change, path in changes:
                     try:
                         relative_path = Path(path).relative_to(root).as_posix()
                     except ValueError:
                         continue
                     changed.add(relative_path)
+                    recent_paths[relative_path] = now + 2 * MOVE_EVENT_GRACE
                     if change in {Change.added, Change.deleted}:
                         added_or_removed.add(relative_path)
-                    if change == Change.added:
-                        added.add(relative_path)
-                if not changed:
-                    continue
+                recent_paths = {
+                    path: deadline for path, deadline in recent_paths.items() if deadline >= now
+                }
 
                 paths = {
                     room.path for room in self.rooms.values()
                     if room.path is not None
-                    and (room.path in changed or any(
+                    and (room.path in missing_paths or room.path in changed or any(
                         parent.as_posix() in added_or_removed for parent in Path(room.path).parents
                     ))
+                }
+                missing_paths = {
+                    path: deadline for path, deadline in missing_paths.items() if path in paths
                 }
                 for path in paths:
                     try:
                         async with disk_lock(self.serverapp.web_app.settings, path):
                             if await ensure_async(manager.file_exists(path)):
+                                missing_paths.pop(path, None)
                                 current_hash = await read_disk_hash(manager, path)
                                 retire_changed_rooms(self.rooms, path, current_hash)
                                 identity = await read_file_identity(root, path)
@@ -104,10 +113,20 @@ class WebSocketProviderExtension(ExtensionApp):
                                     if room.path == path:
                                         room.file_identity = identity
                             else:
-                                destination = await self._find_external_move(manager, root, path, added)
+                                # Some backends deliver the two sides of a move in separate batches.
+                                deadline = missing_paths.setdefault(path, now + MOVE_EVENT_GRACE)
+                                candidates = set(recent_paths)
+                                if now >= deadline:
+                                    candidates.update(await to_thread.run_sync(
+                                        self._nearby_paths, root, path
+                                    ))
+                                destination = await self._find_external_move(manager, root, path, candidates)
                                 if destination is None:
-                                    delete_rooms(self.rooms, path)
+                                    if now >= deadline:
+                                        delete_rooms(self.rooms, path)
+                                        missing_paths.pop(path, None)
                                 else:
+                                    missing_paths.pop(path, None)
                                     current_hash = await read_disk_hash(manager, destination)
                                     await rename_rooms(self.rooms, path, destination, external=True)
                                     retire_changed_rooms(self.rooms, destination, current_hash)
@@ -116,8 +135,20 @@ class WebSocketProviderExtension(ExtensionApp):
         except Exception:
             self.log.warning("Could not watch the local contents directory", exc_info=True)
 
+    @staticmethod
+    def _nearby_paths(root: Path, path: str) -> set[str]:
+        candidates = set()
+        for parent in Path(path).parents:
+            try:
+                candidates.update(
+                    child.relative_to(root).as_posix() for child in (root / parent).iterdir()
+                )
+            except OSError:
+                continue
+        return candidates
+
     async def _find_external_move(
-        self, manager: FileContentsManager, root: Path, path: str, added: set[str]
+        self, manager: FileContentsManager, root: Path, path: str, candidates: set[str]
     ) -> str | None:
         identities = {
             room.file_identity for room in self.rooms.values()
@@ -127,8 +158,12 @@ class WebSocketProviderExtension(ExtensionApp):
             return None
         identity = next(iter(identities))
         destinations = []
-        for candidate in added - {path}:
-            if await read_file_identity(root, candidate) != identity:
+        for candidate in candidates - {path}:
+            try:
+                candidate_identity = await read_file_identity(root, candidate)
+            except OSError:
+                continue
+            if candidate_identity != identity:
                 continue
             if not manager.allow_hidden and await ensure_async(manager.is_hidden(candidate)):
                 continue

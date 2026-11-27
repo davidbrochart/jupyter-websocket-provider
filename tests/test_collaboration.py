@@ -1,5 +1,6 @@
 import json
 from inspect import unwrap
+from pathlib import Path
 from types import SimpleNamespace
 from urllib.parse import quote
 from uuid import UUID
@@ -12,7 +13,7 @@ from tornado.httpserver import HTTPServer
 from tornado.netutil import bind_sockets
 from tornado.web import Application
 from tornado.websocket import websocket_connect
-from watchfiles import awatch
+from watchfiles import Change, awatch
 
 from jupyter_websocket_provider import WebSocketProviderExtension
 from jupyter_websocket_provider.handlers import (
@@ -55,6 +56,7 @@ class CollaborationServer:
         self.sockets = []
         self.watcher_ready = Event()
         self.watcher_batch_processed = Event()
+        self.hide_move_destination = False
 
         manager = AsyncFileContentsManager(root_dir=str(self.root))
         app = Application(contents_manager=manager, ws_ping_interval=0)
@@ -81,8 +83,13 @@ class CollaborationServer:
         options.update(yield_on_timeout=True, rust_timeout=50)
         async for changes in awatch(root, **options):
             self.watcher_ready.set()
+            if self.hide_move_destination:
+                changes = {
+                    (change, path) for change, path in changes
+                    if not (Path(path).name == "renamed.txt" and change != Change.deleted)
+                }
+            yield changes
             if changes:
-                yield changes
                 self.watcher_batch_processed.set()
 
     async def close(self):
@@ -185,12 +192,14 @@ async def test_waiting_client_takes_over_after_initializer_timeout(collaboration
     assert await collaboration.session() == file_id
 
 
-async def test_terminal_rename_keeps_room_and_updates_both_clients(collaboration):
+@pytest.mark.parametrize("hide_move_destination", [False, True])
+async def test_terminal_rename_keeps_room_and_updates_both_clients(collaboration, hide_move_destination):
     file_id, first = await collaboration.initialize_room()
     second = await collaboration.connect(file_id)
     await second.write_message(b"peer sync", binary=True)
     assert await first.read_message() == b"peer sync"
     await collaboration.watcher_ready.wait()
+    collaboration.hide_move_destination = hide_move_destination
     destination = collaboration.root / "renamed.txt"
     collaboration.file.rename(destination)
     notices = [json.loads(await peer.read_message()) for peer in (first, second)]
