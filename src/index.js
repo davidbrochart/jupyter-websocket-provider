@@ -44,7 +44,7 @@ function withDocumentInitialization(model, Socket, onExpired, onRename, onExtern
               pendingInitialization = message;
               this.send('initialized');
             } else if (message.type === 'rename') {
-              onRename(message.path);
+              onRename(message.path, message.publish);
             }
             return;
           }
@@ -104,7 +104,7 @@ class ContentsSavingProvider extends WebSocketProvider {
       options.model,
       serverSettings.WebSocket,
       () => this.dispose(),
-      path => this.onRoomRenamed(path),
+      (path, publish) => this.onRoomRenamed(path, publish),
       deleted => this.onExternalChange(deleted)
     );
     super({
@@ -180,8 +180,11 @@ class ContentsSavingProvider extends WebSocketProvider {
     }
   }
 
-  onRoomRenamed(path) {
+  onRoomRenamed(path, publish) {
     this.savePath = path;
+    if (publish && this.state.get('path') !== path) {
+      this.options.model.transact(() => this.state.set('path', path), false);
+    }
   }
 
   onExternalChange(deleted) {
@@ -193,6 +196,7 @@ class ContentsSavingProvider extends WebSocketProvider {
       change.reason = 'deleted';
     }
     this.externalChangeStatus = change;
+    this.options.model.dirty = true;
     this.externalChange.updateStatus(change);
     // Stop reconnecting while keeping the notice and shared model alive.
     queueMicrotask(() => super.dispose());

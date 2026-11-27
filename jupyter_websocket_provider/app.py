@@ -14,6 +14,7 @@ from .handlers import (
     delete_rooms,
     disk_lock,
     read_disk_hash,
+    read_file_identity,
     rename_rooms,
     retire_changed_rooms,
 )
@@ -71,6 +72,7 @@ class WebSocketProviderExtension(ExtensionApp):
             ):
                 changed = set()
                 added_or_removed = set()
+                added = set()
                 for change, path in changes:
                     try:
                         relative_path = Path(path).relative_to(root).as_posix()
@@ -79,6 +81,8 @@ class WebSocketProviderExtension(ExtensionApp):
                     changed.add(relative_path)
                     if change in {Change.added, Change.deleted}:
                         added_or_removed.add(relative_path)
+                    if change == Change.added:
+                        added.add(relative_path)
                 if not changed:
                     continue
 
@@ -95,12 +99,42 @@ class WebSocketProviderExtension(ExtensionApp):
                             if await ensure_async(manager.file_exists(path)):
                                 current_hash = await read_disk_hash(manager, path)
                                 retire_changed_rooms(self.rooms, path, current_hash)
+                                identity = await read_file_identity(root, path)
+                                for room in self.rooms.values():
+                                    if room.path == path:
+                                        room.file_identity = identity
                             else:
-                                delete_rooms(self.rooms, path)
+                                destination = await self._find_external_move(manager, root, path, added)
+                                if destination is None:
+                                    delete_rooms(self.rooms, path)
+                                else:
+                                    current_hash = await read_disk_hash(manager, destination)
+                                    await rename_rooms(self.rooms, path, destination, external=True)
+                                    retire_changed_rooms(self.rooms, destination, current_hash)
                     except Exception:
                         self.log.warning("Could not check disk changes for %r", path, exc_info=True)
         except Exception:
             self.log.warning("Could not watch the local contents directory", exc_info=True)
+
+    async def _find_external_move(
+        self, manager: FileContentsManager, root: Path, path: str, added: set[str]
+    ) -> str | None:
+        identities = {
+            room.file_identity for room in self.rooms.values()
+            if room.path == path and room.file_identity is not None
+        }
+        if len(identities) != 1:
+            return None
+        identity = next(iter(identities))
+        destinations = []
+        for candidate in added - {path}:
+            if await read_file_identity(root, candidate) != identity:
+                continue
+            if not manager.allow_hidden and await ensure_async(manager.is_hidden(candidate)):
+                continue
+            if await ensure_async(manager.file_exists(candidate)):
+                destinations.append(candidate)
+        return destinations[0] if len(destinations) == 1 else None
 
     async def stop_extension(self):
         group = self.serverapp.web_app.settings.get("websocket_provider_task_group")

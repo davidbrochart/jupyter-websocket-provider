@@ -31,6 +31,9 @@ dependencies = [
     "watchfiles>=1.0,<2",
 ]
 
+[dependency-groups]
+test = ["pytest>=8"]
+
 [tool.hatch.build.targets.wheel.shared-data]
 "jupyter-config/jupyter_websocket_provider.json" = "etc/jupyter/jupyter_server_config.d/jupyter_websocket_provider.json"
 "jupyter_websocket_provider/labextension" = "share/jupyter/labextensions/jupyter-websocket-provider"
