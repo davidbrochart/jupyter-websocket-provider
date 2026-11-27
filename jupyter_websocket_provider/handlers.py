@@ -2,10 +2,11 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass, field
+from pathlib import Path
 from uuid import uuid4
 from weakref import WeakValueDictionary
 
-from anyio import CancelScope, Event, Lock, create_task_group, sleep
+from anyio import CancelScope, Event, Lock, create_task_group, sleep, to_thread
 from anyio.abc import TaskGroup
 from jupyter_core.utils import ensure_async
 from jupyter_server.auth import authorized
@@ -37,7 +38,9 @@ def find_room_key(
     )
 
 
-async def rename_rooms(rooms: dict[tuple[str, ...], Room], old_path: str, new_path: str):
+async def rename_rooms(
+    rooms: dict[tuple[str, ...], Room], old_path: str, new_path: str, *, external: bool = False
+):
     async with create_task_group() as tasks:
         for key, room in list(rooms.items()):
             if room.path != old_path:
@@ -48,8 +51,9 @@ async def rename_rooms(rooms: dict[tuple[str, ...], Room], old_path: str, new_pa
                 for client in displaced.clients:
                     client._close_stale_room()
             room.path = new_path
+            publisher = next(iter(room.clients), None) if external else None
             for client in room.clients:
-                tasks.start_soon(client._send_rename, new_path)
+                tasks.start_soon(client._send_rename, new_path, client is publisher)
 
 
 def delete_rooms(rooms: dict[tuple[str, ...], Room], path: str):
@@ -83,6 +87,14 @@ def disk_lock(settings: dict, path: str) -> Lock:
 async def read_disk_hash(manager: FileContentsManager, path: str) -> str | None:
     model = await ensure_async(manager.get(path, content=False, require_hash=True))
     return model.get("hash")
+
+
+async def read_file_identity(root: Path, path: str) -> tuple[int, int] | None:
+    try:
+        info = await to_thread.run_sync((root / path).lstat)
+    except FileNotFoundError:
+        return None
+    return info.st_dev, info.st_ino
 
 
 def retire_changed_rooms(rooms: dict[tuple[str, ...], Room], path: str, disk_hash: str | None):
@@ -164,6 +176,7 @@ class Room:
     initializer: CollaborationWebSocketHandler | None = None
     path: str | None = None
     disk_hash: str | None = None
+    file_identity: tuple[int, int] | None = None
     started: bool = False
 
 
@@ -205,12 +218,14 @@ class DocumentSaveHandler(APIHandler):
             if isinstance(manager, FileContentsManager):
                 try:
                     saved_hash = await read_disk_hash(manager, path)
+                    identity = await read_file_identity(Path(manager.root_dir), path)
                 except Exception:
                     self.log.warning("Could not record the disk hash for %r", path, exc_info=True)
                 else:
                     for room in self.rooms.values():
                         if room.path == path:
                             room.disk_hash = saved_hash
+                            room.file_identity = identity
         self.set_status(204)
         self.finish()
 
@@ -321,6 +336,8 @@ class CollaborationWebSocketHandler(WebSocketMixin, WebSocketHandler, JupyterHan
                 )
             )
             room.disk_hash = model.get("hash")
+            if isinstance(manager, FileContentsManager):
+                room.file_identity = await read_file_identity(Path(manager.root_dir), path)
         if (model["format"], model["type"]) not in DOCUMENT_FORMATS:
             raise HTTPError(400, "Unsupported document type")
         return json.dumps({
@@ -378,7 +395,7 @@ class CollaborationWebSocketHandler(WebSocketMixin, WebSocketHandler, JupyterHan
                 try:
                     await self.write_message(EMPTY_SYNC_REPLY, binary=True)
                     if room.path != self.initial_path:
-                        await self._send_rename(room.path)
+                        await self._send_rename(room.path, publish=True)
                 except (WebSocketClosedError, StreamClosedError):
                     self.close()
                     room.clients.discard(self)
@@ -403,8 +420,11 @@ class CollaborationWebSocketHandler(WebSocketMixin, WebSocketHandler, JupyterHan
         except (WebSocketClosedError, StreamClosedError):
             self.close()
 
-    async def _send_rename(self, path: str):
-        await self._relay(json.dumps({"type": "rename", "path": path}))
+    async def _send_rename(self, path: str, publish: bool = False):
+        message = {"type": "rename", "path": path}
+        if publish:
+            message["publish"] = True
+        await self._relay(json.dumps(message))
 
     def on_close(self):
         self.closed = True

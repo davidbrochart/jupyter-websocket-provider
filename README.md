@@ -45,8 +45,9 @@ the room is active.
   external-change notice in connected tabs. Use **Save to original file** to
   restore it, **Save As…** to choose a destination, or **Close tab** to close
   the deleted document. Saves from the retired session are rejected. With a
-  local file Contents Manager,
-  deletions made from the terminal trigger the same notice.
+  local file Contents Manager, deletions made from the terminal trigger the
+  same notice. When the watcher can identify the same file at a new path
+  inside the Jupyter root, the room follows the move and keeps its file ID.
 - With a local file Contents Manager, the server also compares disk content
   hashes on filesystem changes and before collaborative saves. An external
   edit retires the room if the hash differs. Use **Load from disk** to open
@@ -61,3 +62,15 @@ The relay also provides the global awareness room for collaboration presence.
 To rebuild the prebuilt frontend after editing its source, install the Python
 `jupyter-builder` package, run `npm install && npm run build`, then reinstall
 the Python package.
+
+## Tests
+
+With pip 25.1 or newer, install the test dependencies and run pytest from the
+repository root.
+
+```sh
+python -m pip install --group test -e .
+python -m pytest tests
+```
+
+The integration tests use temporary files and localhost WebSocket connections.
