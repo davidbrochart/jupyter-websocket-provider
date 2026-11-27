@@ -1,0 +1,10 @@
+/.agents/
+/.aws/
+/.codex/
+/.venv/
+/build/
+/dist/
+/node_modules/
+.ipynb_checkpoints/
+__pycache__/
+*.py[cod]

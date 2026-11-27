@@ -1,0 +1,44 @@
+{
+  "name": "jupyter-websocket-provider",
+  "version": "0.1.0",
+  "license": "BSD-3-Clause",
+  "private": true,
+  "main": "src/index.js",
+  "scripts": {
+    "build": "jupyter-builder build ."
+  },
+  "dependencies": {
+    "@jupyter/docprovider": "^5.1.0-alpha.2",
+    "@jupyterlab/coreutils": "^6.0.0",
+    "@jupyterlab/docmanager": "^4.0.0",
+    "@jupyterlab/services": "^7.0.0"
+  },
+  "devDependencies": {
+    "@jupyter/builder": "^1.2.0"
+  },
+  "jupyterlab": {
+    "extension": true,
+    "outputDir": "jupyter_websocket_provider/labextension",
+    "disabledExtensions": [
+      "@jupyter/docprovider-extension:websocket-provider-document-factory"
+    ],
+    "sharedPackages": {
+      "@jupyter/docprovider": {
+        "bundled": false,
+        "singleton": true
+      },
+      "@jupyterlab/coreutils": {
+        "bundled": false,
+        "singleton": true
+      },
+      "@jupyterlab/docmanager": {
+        "bundled": false,
+        "singleton": true
+      },
+      "@jupyterlab/services": {
+        "bundled": false,
+        "singleton": true
+      }
+    }
+  }
+}
